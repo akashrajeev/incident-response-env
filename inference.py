@@ -359,7 +359,7 @@ def run_episode(
                 action_line = _action_str(action)
 
                 step_payload = requests.post(
-                    f"{ENV_URL}/step", json=action, timeout=15
+                    f"{ENV_URL}/step", json={"action": action}, timeout=15
                 ).json()
                 obs = _normalize_step_payload(step_payload)
 
