@@ -1,0 +1,19 @@
+# Lean image / faster uploads for HF Spaces
+.venv
+venv
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.git
+.gitignore
+.cursor
+*.egg-info
+dist
+build
+.uv
+*.md.bak
+.env
+.env.*
