@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from openenv.core.env_server.interfaces import Environment
+from openenv.core.env_server.types import EnvironmentMetadata
 
 try:
     from ..models import Alert, IncidentAction, IncidentObservation, IncidentState
@@ -31,7 +32,8 @@ class _InternalAlert:
 
 class IncidentResponseEnvironment(Environment):
     # HTTP server uses a process-wide shared instance for /reset + /step; only
-    # one logical episode/client should drive it at a time.
+    # one logical episode/client should drive it at a time. Parallel evaluators
+    # against the same Space would interleave; run sequential episodes or one client.
     SUPPORTS_CONCURRENT_SESSIONS: bool = False
 
     def __init__(self):
@@ -100,6 +102,17 @@ class IncidentResponseEnvironment(Environment):
             done=done,
             reward=reward,
             message=feedback,
+        )
+
+    def get_metadata(self) -> EnvironmentMetadata:  # type: ignore[override]
+        return EnvironmentMetadata(
+            name=self.__class__.__name__,
+            description=(
+                "Incident triage env (easy/medium/hard). "
+                "HTTP mode: single shared episode per process; always POST /reset before a new task. "
+                "SUPPORTS_CONCURRENT_SESSIONS is False."
+            ),
+            version="1.0.0",
         )
 
     @property

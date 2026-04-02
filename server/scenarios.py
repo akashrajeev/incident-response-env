@@ -81,7 +81,7 @@ class ScenarioGenerator:
         return Scenario(
             name="disk_full",
             kind="disk_full",
-            max_steps=3,
+            max_steps=5,
             initial_health=0.55,
             initial_alerts_internal=[
                 (
@@ -161,7 +161,7 @@ class ScenarioGenerator:
         return Scenario(
             name="cascading_db_failure",
             kind="cascading_db_failure",
-            max_steps=8,
+            max_steps=10,
             initial_health=0.6,
             initial_alerts_internal=alerts,
             root_cause_alert_id="db-001",
@@ -205,7 +205,7 @@ class ScenarioGenerator:
         return Scenario(
             name="full_cascade_failure",
             kind="full_cascade_failure",
-            max_steps=max(10, len(chain_ids) * 3),
+            max_steps=20,
             initial_health=0.45,
             initial_alerts_internal=internal,
             root_cause_alert_id=chain_ids[0],

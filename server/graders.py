@@ -105,14 +105,13 @@ class IncidentGrader:
             return 0.0, "Cascade already resolved."
 
         if action.alert_id == expected_id:
-            reward = 0.25
+            # Per-step share of 1.0 so a perfect run sums to 1.0 (matches episode score cap).
+            n = len(chain)
+            reward = 1.0 / n
             feedback = "Correct next step in the cascade chain."
-            # Bonus if notes mention the correct service/source.
             svc = alert_by_id[expected_id].source
             if svc and svc.lower() in (action.notes or "").lower():
-                reward = min(1.0, reward + 0.1)
                 feedback += " Reasoning mentions the correct service."
-            # If this is the final link, cap to 1.0 total (environment accumulates).
             if expected_index == len(chain) - 1:
                 feedback += " Chain complete."
             return reward, feedback

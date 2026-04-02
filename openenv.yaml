@@ -17,6 +17,7 @@ tasks:
   - id: task_hard
     name: Cascading Failure Resolution
     difficulty: hard
+    # Matches server scenario max_steps; chain has 3-5 svc alerts depending on randomness.
     max_steps: 20
 
 observation_space:
