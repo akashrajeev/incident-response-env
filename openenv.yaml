@@ -1,0 +1,52 @@
+name: incident-response-env
+version: "1.0.0"
+description: >
+  Train AI agents to triage real-world server incidents.
+  Agent receives firing alerts and must identify root causes,
+  prioritize correctly, and resolve cascading failures.
+
+tasks:
+  - id: task_easy
+    name: Single Alert Triage
+    difficulty: easy
+    max_steps: 5
+  - id: task_medium
+    name: Root Cause Identification
+    difficulty: medium
+    max_steps: 10
+  - id: task_hard
+    name: Cascading Failure Resolution
+    difficulty: hard
+    max_steps: 20
+
+observation_space:
+  type: structured
+  description: >
+    Active incident state: alerts (list of {id, title, severity, description, source}),
+    resolved_alerts (alert IDs cleared so far), system_health (0.0-1.0), step_number,
+    and message (environment feedback). Reward and done are returned by the OpenEnv
+    step wrapper alongside the observation.
+
+action_space:
+  type: structured
+  description: >
+    Structured remediation. action_type must be one of: investigate, scale_up,
+    restart, rollback, fix, mitigate, remediate, isolate, block (see models.IncidentAction).
+  fields:
+    - alert_id: string
+    - action_type: string
+    - notes: string
+  action_type_allowed:
+    - investigate
+    - scale_up
+    - restart
+    - rollback
+    - fix
+    - mitigate
+    - remediate
+    - isolate
+    - block
+
+reward_range: [0.0, 1.0]
+# Set to your Hugging Face Docker Space repo before deploy, e.g. username/incident-response-env
+docker_image: your-hf-username/incident-response-env
