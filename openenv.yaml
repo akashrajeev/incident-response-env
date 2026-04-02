@@ -49,4 +49,4 @@ action_space:
 
 reward_range: [0.0, 1.0]
 # Set to your Hugging Face Docker Space repo before deploy, e.g. username/incident-response-env
-docker_image: your-hf-username/incident-response-env
+docker_image: akashrajeev/incident-response-env
