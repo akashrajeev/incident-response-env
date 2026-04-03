@@ -12,24 +12,25 @@ tags:
 
 # Incident Response OpenEnv
 
-Realistic **site reliability / incident triage** environment for [OpenEnv](https://github.com/meta-pytorch/OpenEnv): agents read firing alerts, choose a remediation **`action_type`**, target the correct **`alert_id`**, and receive graded rewards with partial credit. Three benchmark tasks (**easy -> medium -> hard**) simulate single-incident triage, root-cause among symptoms, and ordered cascade resolution.
+Realistic **site reliability / incident triage** environment for [OpenEnv](https://github.com/meta-pytorch/OpenEnv): agents read firing alerts, choose a remediation **`action_type`**, target the correct **`alert_id`**, and receive graded rewards with partial credit. **Four** benchmark tasks (**easy → medium → hard → expert**) cover single-alert triage, root-cause identification among symptoms, ordered cascade resolution, and an **alert storm** with noise vs signal.
 
 ## Why this submission stands out
 
 - **Real-world domain** - not a toy grid or guessing game; models must reason about dependencies and severities.
 - **Full OpenEnv surface** - typed `Action` / `Observation` / `State`, `reset` / `step` / `state`, `openenv.yaml`, HTTP API, Docker.
-- **Meaningful rewards** - sparse success on wrong targets, partial signals for "right direction," chain order on hard tasks.
+- **Meaningful rewards** - sparse success on wrong targets, partial signals for "right direction," chain order on hard tasks, ordered resolution under noise on expert.
 - **Reproducible baseline** - root `inference.py` using the official OpenAI client, env vars `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN`, structured `[START]` / `[STEP]` / `[END]` logs only on stdout by default (no extra lines).
 
 ## Tasks
 
-| Task          | Focus                                      |
-|---------------|---------------------------------------------|
-| `task_easy`   | Single disk pressure alert -> scale storage. |
-| `task_medium` | Multiple alerts -> remediate DB root cause.  |
-| `task_hard`   | Ordered `inc-342`... cascade -> full chain.    |
+| Task | Difficulty | Focus |
+|------|------------|--------|
+| `task_easy` | easy | Single alert (e.g. disk / CPU / memory); pick the correct resolution action. |
+| `task_medium` | medium | Several alerts; find and fix the **root cause** (e.g. DB), not only symptoms. |
+| `task_hard` | hard | **Cascade chain**: investigate and resolve each upstream link in order until the chain clears. |
+| `task_expert` | expert | **Alert storm**: many low-severity noise alerts plus a hidden dependency chain; ignore noise and resolve the real chain in order. |
 
-Rewards are always in **\[0, 1]** per step; the baseline caps **episode score** at **1.0** (sum of step rewards).
+Rewards are always in **\[0, 1]** per step; the baseline caps **episode score** at **1.0** (sum of step rewards, clamped).
 
 ## Action & observation
 
@@ -62,7 +63,7 @@ curl -s -X POST http://127.0.0.1:8000/step -H "Content-Type: application/json" -
 
 ## Baseline inference (`inference.py`)
 
-Required for the hackathon harness (OpenAI-compatible client):
+Required for the hackathon harness: the official **`OpenAI` Python client** with an **OpenAI-compatible** HTTP API (`base_url` + API key). This repo follows the Round 1 sample: use **`HF_TOKEN`** as the client API key and **`API_BASE_URL`** / **`MODEL_NAME`** for the endpoint and model id. Some writeups mention **`OPENAI_API_KEY`**; that is equivalent only if you point the same client at an OpenAI endpoint and set that variable instead—**this project does not read `OPENAI_API_KEY` by default.**
 
 ```powershell
 $env:ENV_URL       = "http://127.0.0.1:8000"
@@ -71,6 +72,21 @@ $env:MODEL_NAME    = "<model id>"
 $env:HF_TOKEN      = "<hf token>"
 uv run python inference.py
 ```
+
+### Baseline scores (reproducibility)
+
+Episode **score** is the sum of per-step rewards, capped at **1.0**. **`success`** in `[END]` uses `SUCCESS_SCORE_THRESHOLD` (default **0.1**). Exact numbers depend on the **model**, **provider**, and **scenario randomness** unless you fix **`ENV_URL`**, credentials, and (when supported) a seed.
+
+Example run (local env, **`temperature=0`** in `inference.py`, Hugging Face router, model id along the lines of **`llama-3.1-8b-instant`** / **`meta-llama/Llama-3.1-8B-Instruct`** per your **`MODEL_NAME`**):
+
+| Task | Episode score (`[END] score=`) | `success=` |
+|------|-------------------------------|------------|
+| `task_easy` | 1.000 | `true` |
+| `task_medium` | 1.000 | `true` |
+| `task_hard` | 1.000 | `true` |
+| `task_expert` | 0.070 | `false` |
+
+Re-run after changing the model or env and paste your own row into submissions if organizers ask for measured baselines.
 
 Optional:
 
@@ -83,8 +99,11 @@ Runtime: keep total wall clock **under 20 minutes**; use a small instruct model 
 
 ## Docker
 
+Root **`Dockerfile`** (Hugging Face default) and **`server/Dockerfile`** are kept in sync.
+
 ```bash
-docker build -t incident-response-env -f server/Dockerfile .
+docker build -t incident-response-env .
+# equivalent: docker build -t incident-response-env -f server/Dockerfile .
 docker run --rm -p 8000:8000 incident-response-env
 ```
 
@@ -157,8 +176,8 @@ Cross-check with the official dashboard (e.g. Scaler / Meta OpenEnv Round 1):
 - [ ] **`openenv validate`** OK; **`uv.lock`** present if required
 - [ ] **Dockerfile** builds in CI
 - [ ] **HF Space** up; health + reset respond
-- [ ] **>= 3 tasks** with graders; rewards in **[0, 1]**
-- [ ] **README** describes domain, spaces, setup (this file)
+- [ ] **≥ 3 tasks** (this repo has **4**) with graders; rewards in **[0, 1]**
+- [ ] **README** describes domain, action/observation spaces, tasks, setup, and **example baseline scores** (this file)
 - [ ] No secrets in git; rotate any leaked tokens
 
 ## Project layout
