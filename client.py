@@ -43,7 +43,7 @@ class IncidentResponseEnv(
         ...
         ...     result = client.step(
         ...         IncidentResponseAction(
-        ...             alert_id="disk-alert-1",
+        ...             alert_id="<alert-id>",
         ...             action_type="scale_up",
         ...             notes="Relieve disk pressure.",
         ...         )

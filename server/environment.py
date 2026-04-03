@@ -41,6 +41,7 @@ class IncidentResponseEnvironment(Environment):
         self.scenario: Optional[Scenario] = None
 
         self.resolved: List[str] = []
+        self._investigated: List[str] = []
         self.step_count: int = 0
         self.episode_id: str = ""
         self.task_id: str = "task_easy"
@@ -52,6 +53,7 @@ class IncidentResponseEnvironment(Environment):
     def reset(self, task_id: str = "task_easy", seed: int | None = None):  # type: ignore[override]
         self.scenario = ScenarioGenerator.generate(task_id, seed=seed)
         self.resolved = []
+        self._investigated = []
         self.step_count = 0
         self.episode_id = str(uuid.uuid4())[:8]
         self.task_id = task_id
@@ -85,7 +87,15 @@ class IncidentResponseEnvironment(Environment):
             scenario=self.scenario,  # type: ignore[arg-type]
             step=self.step_count,
             resolved=self.resolved,
+            investigated=self._investigated,
         )
+        if (
+            (action.action_type or "").lower().strip() == "investigate"
+            and reward > 0
+            and action.alert_id
+            and action.alert_id not in self._investigated
+        ):
+            self._investigated.append(action.alert_id)
         self.total_reward += reward
 
         self._maybe_resolve(action)
@@ -165,7 +175,7 @@ class IncidentResponseEnvironment(Environment):
             return
 
         # Hard task: only allow resolving the next upstream link in the chain.
-        if self.scenario.kind == "full_cascade_failure" and self.scenario.cascade_chain_alert_ids:
+        if self.scenario.kind in ("full_cascade_failure", "alert_storm") and self.scenario.cascade_chain_alert_ids:
             chain = list(self.scenario.cascade_chain_alert_ids)
             expected_index = 0
             for cid in chain:
@@ -205,7 +215,7 @@ class IncidentResponseEnvironment(Environment):
         if self.scenario is None:
             return False
         if (
-            self.scenario.kind == "full_cascade_failure"
+            self.scenario.kind in ("full_cascade_failure", "alert_storm")
             and self.scenario.cascade_chain_alert_ids
         ):
             return all(

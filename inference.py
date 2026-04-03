@@ -1,7 +1,6 @@
 import json
 import os
 import time
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -19,58 +18,34 @@ SUCCESS_SCORE_THRESHOLD = float(os.environ.get("SUCCESS_SCORE_THRESHOLD", "0.1")
 # Stricter bar for reporting "all tasks strong" (e.g. leaderboard psychologics).
 STRICT_TASK_SCORE = float(os.environ.get("STRICT_TASK_SCORE", "0.95"))
 
-SYSTEM_PROMPT = """You are an expert Site Reliability Engineer (SRE).
-You receive a JSON object each turn (not raw alert list only). It includes task_id, step, alerts,
-resolved_alert_ids, and environment_message from the simulator.
+SYSTEM_PROMPT = """You are an expert Site Reliability Engineer (SRE) 
+doing live incident triage.
 
-CRITICAL RULES:
-- alert_id MUST be copied exactly from one of the "id" fields in the CURRENT alerts array.
-- NEVER invent IDs. NEVER reuse IDs from prior tasks or examples.
-- Read environment_message every step. If it says "Out of order" or reward was low, change strategy:
-  follow the rules for your task_id below.
+You will receive a JSON object with:
+- task_id: the current task
+- step: current step number
+- alerts: list of active alerts, each with id, title, severity, description, source
+- resolved_alert_ids: alerts already resolved this episode
+- environment_message: feedback from your last action
 
-TASK-SPECIFIC POLICY (use task_id from the JSON):
-- task_easy: Usually one disk/storage alert. action_type scale_up on THAT alert's id.
-- task_medium: Database pool / root cause (often id db-001). Remediate root before symptoms;
-  scale_up or fix on the DB alert id is appropriate.
-- task_hard: Cascading service failure. Alert ids look like svc-001, svc-002, svc-003, ...
-  You MUST remediate in strict numeric order: among alerts still present, pick the id with the
-  **smallest** N in svc-NNN (e.g. svc-001 before svc-005). Use action_type **fix** for that
-  upstream failing service unless the alert text clearly indicates capacity-only (then scale_up).
-  Do not pick a higher-numbered svc while a lower-numbered one is still in alerts.
+Your job: decide which alert to address and what action to take.
+
+Rules:
+- alert_id MUST be copied exactly from the id field of one active alert
+- Read descriptions carefully — they contain dependency and causality clues
+- Address root causes before downstream symptoms
+- Low/info severity alerts are usually noise unless description clearly shows causality
+- Always mention the service name in your notes
 
 Available action_type values:
-- scale_up, fix, restart, rollback, mitigate, remediate, isolate, block
+scale_up, fix, restart, rollback, mitigate, remediate, isolate, block, investigate
 
-Always provide non-empty "notes" (one sentence). When the chosen alert has a "source" field
-(e.g. auth-service, database), mention that exact string in notes - it aligns with grading bonuses.
-
-Respond ONLY as JSON:
+Respond ONLY as JSON with no extra text:
 {
-  "alert_id": "string (required)",
-  "action_type": "string (required)",
-  "notes": "string (required - brief, include source when present)"
-}
-"""
-
-
-def _task_hard_chain_head_id(alerts: Any) -> Optional[str]:
-    """Smallest svc-NNN among active alerts, for ordering hints."""
-    if not isinstance(alerts, list):
-        return None
-    best: Optional[Tuple[int, str]] = None
-    pattern = re.compile(r"^svc-(\d+)$", re.IGNORECASE)
-    for a in alerts:
-        if not isinstance(a, dict):
-            continue
-        raw = str(a.get("id", "")).strip()
-        m = pattern.match(raw)
-        if not m:
-            continue
-        n = int(m.group(1))
-        if best is None or n < best[0]:
-            best = (n, raw)
-    return best[1] if best else None
+  "alert_id": "exact id from active alerts list",
+  "action_type": "chosen action",
+  "notes": "one sentence mentioning the service name and your reasoning"
+}"""
 
 
 def _build_llm_user_payload(*, task_id: str, step: int, obs: Dict[str, Any]) -> str:
@@ -82,15 +57,9 @@ def _build_llm_user_payload(*, task_id: str, step: int, obs: Dict[str, Any]) -> 
         "resolved_alert_ids": obs.get("resolved_alerts") or [],
         "environment_message": obs.get("message") or "",
     }
-    if task_id == "task_hard":
-        head = _task_hard_chain_head_id(alerts)
-        if head:
-            payload["cascade_next_id_hint"] = (
-                f"Lowest-index unresolved svc in this list is {head!r}; prefer that alert_id."
-            )
     return json.dumps(payload, ensure_ascii=False)
 
-_TASK_MAX_STEPS = {"task_easy": 5, "task_medium": 10, "task_hard": 20}
+_TASK_MAX_STEPS = {"task_easy": 5, "task_medium": 10, "task_hard": 20, "task_expert": 15}
 
 
 def _truthy_env(name: str) -> bool:
@@ -113,19 +82,29 @@ def _stub_action(
     workable = [i for i in episode_alert_ids if i not in resolved]
 
     if task_id == "task_easy":
-        aid = (
-            "disk-alert-1"
-            if "disk-alert-1" in active_ids
-            else (active_ids[0] if active_ids else "")
+        aid = active_ids[0] if active_ids else ""
+        kind = aid.split("-")[0] if aid else "disk"
+        action_type = (
+            "restart"
+            if kind in ("cpu", "memory")
+            else "scale_up"
+            if kind == "disk"
+            else "mitigate"
         )
-        return {"alert_id": aid, "action_type": "scale_up", "notes": "stub policy"}
+        return {"alert_id": aid, "action_type": action_type, "notes": "stub policy"}
 
     if task_id == "task_medium":
-        aid = "db-001" if "db-001" in active_ids else ""
+        aid = active_ids[0] if active_ids else ""
         if not aid:
             pick = _pick_fallback_alert_id(alerts, workable)
             aid = pick or ""
         return {"alert_id": aid, "action_type": "scale_up", "notes": "stub policy"}
+
+    if task_id == "task_expert":
+        real_ids = [i for i in episode_alert_ids if not i.startswith("noise")]
+        unresolved_real = [i for i in real_ids if i not in resolved]
+        aid = unresolved_real[0] if unresolved_real else (active_ids[0] if active_ids else "")
+        return {"alert_id": aid, "action_type": "fix", "notes": "stub: addressing real service failure"}
 
     aid = active_ids[0] if active_ids else ""
     if not aid:
@@ -252,7 +231,7 @@ def _sanitize_action(
     episode_alert_ids: List[str],
 ) -> Dict[str, Any]:
     """
-    If the model hallucinates an alert_id (e.g. disk-alert-1 from a prior task), repair.
+    If the model hallucinates an alert_id from a prior task, repair.
 
     Only ids that appeared in the initial reset for THIS episode are valid - never trust
     the model to invent ids. Also avoid targeting an id already in resolved_alerts.
@@ -272,7 +251,7 @@ def _sanitize_action(
         return action
 
     out = dict(action)
-    # Preserve reset order (important for cascade chain: svc-001 before svc-002, ...)
+    # Preserve reset order (important for cascade chain: earlier IDs before later ones, ...)
     unresolved_for_pick = workable
     chosen = _pick_fallback_alert_id(alerts, unresolved_for_pick)
     if chosen is None:
@@ -441,7 +420,7 @@ def main() -> None:
         )
         model_name = MODEL_NAME
 
-    tasks = ["task_easy", "task_medium", "task_hard"]
+    tasks = ["task_easy", "task_medium", "task_hard", "task_expert"]
     episode_scores: List[Tuple[str, float]] = []
     for task in tasks:
         ep_score = run_episode(

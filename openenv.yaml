@@ -19,6 +19,10 @@ tasks:
     difficulty: hard
     # Matches server scenario max_steps; chain has 3-5 svc alerts depending on randomness.
     max_steps: 20
+  - id: task_expert
+    name: Alert Storm — Signal vs Noise
+    difficulty: expert
+    max_steps: 15
 
 observation_space:
   type: structured

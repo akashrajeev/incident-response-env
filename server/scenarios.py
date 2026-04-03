@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     from models import Alert
 
 
-ScenarioKind = Literal["disk_full", "cascading_db_failure", "full_cascade_failure"]
+ScenarioKind = Literal["disk_full", "cascading_db_failure", "full_cascade_failure", "alert_storm"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ class Scenario:
     initial_alerts_internal: Sequence[Tuple[Alert, bool]]
 
     # Internal ground truth (never shown to agent)
+    correct_action: str = ""
     root_cause_alert_id: str | None = None
     cascade_chain_alert_ids: Sequence[str] = ()
 
@@ -62,9 +63,10 @@ class ScenarioGenerator:
 
         if task_id == "task_easy":
             return ScenarioGenerator._single_alert()
-
-        if task_id == "task_medium":
+        elif task_id == "task_medium":
             return ScenarioGenerator._root_cause(n_services=n_services or random.randint(3, 5))
+        elif task_id == "task_expert":
+            return ScenarioGenerator._alert_storm()
 
         # task_hard (or anything else) maps to cascade chain
         return ScenarioGenerator._cascade_chain(chain_length=chain_length or random.randint(3, 5))
@@ -78,6 +80,34 @@ class ScenarioGenerator:
     @staticmethod
     def _single_alert() -> Scenario:
         # Required Task 1 scenario: "disk_full"
+        options = [
+            (
+                "disk",
+                "storage-service",
+                "Disk at 99% — scale up required",
+                "Storage node out of space. Writes failing intermittently. Immediately scale up storage capacity to resolve.",
+                "scale_up",
+            ),
+            (
+                "cpu",
+                "compute-node",
+                "CPU at 100% — scale up required",
+                "Sustained CPU spike. Request timeouts increasing. Scale up compute capacity to relieve pressure.",
+                "scale_up",
+            ),
+            (
+                "memory",
+                "app-server",
+                "Memory exhausted — restart required",
+                "Memory pressure critical. OOM risk imminent. Restart the service to recover memory.",
+                "restart",
+            ),
+        ]
+
+        kind, source, title_template, desc, action = random.choice(options)
+        n = random.randint(1, 9)
+        alert_id = f"{kind}-alert-{n:02d}"
+
         return Scenario(
             name="disk_full",
             kind="disk_full",
@@ -86,119 +116,139 @@ class ScenarioGenerator:
             initial_alerts_internal=[
                 (
                     Alert(
-                        id="disk-alert-1",
-                        title="Disk at 99%",
+                        id=alert_id,
+                        title=title_template,
                         severity="critical",
-                        description="Storage node nearly out of space. Writes failing intermittently.",
-                        source="storage-service",
+                        description=desc,
+                        source=source,
                     ),
                     True,
                 )
             ],
-            root_cause_alert_id="disk-alert-1",
+            root_cause_alert_id=alert_id,
+            correct_action=action,
         )
 
     @staticmethod
     def _root_cause(*, n_services: int) -> Scenario:
         # Required Task 2 scenario: "cascading_db_failure"
-        services = ScenarioGenerator._pick_services(max(3, n_services))
-        db_service = "database"
-        if db_service not in services:
-            services[0] = db_service
+        root_services = ["postgres", "mysql", "redis", "mongodb", "elasticsearch"]
+        root_src = random.choice(root_services)
+        root_id = f"{root_src}-{random.randint(1,5):03d}"
 
-        api_service = "api-gateway" if "api-gateway" in services else services[1]
-        pay_service = "payment-service" if "payment-service" in services else services[2]
+        symptom_ids: list[str] = []
+        while len(symptom_ids) < 2:
+            sid = f"svc-sym-{random.randint(10, 99)}"
+            if sid != root_id and sid not in symptom_ids:
+                symptom_ids.append(sid)
 
-        alerts: list[Tuple[Alert, bool]] = [
-            (
-                Alert(
-                    id="db-001",
-                    title="DB connection timeout",
-                    severity="critical",
-                    description="Database pool exhausted; connections timing out. Downstream services likely impacted.",
-                    source=db_service,
-                ),
-                True,
-            ),
-            (
-                Alert(
-                    id="api-002",
-                    title="High error rate",
-                    severity="medium",
-                    description="5xx rate elevated. Errors correlate with DB timeout spikes.",
-                    source=api_service,
-                ),
-                False,
-            ),
-            (
-                Alert(
-                    id="pay-003",
-                    title="Requests failing",
-                    severity="medium",
-                    description="Payment calls failing with dependency errors (DB).",
-                    source=pay_service,
-                ),
-                False,
-            ),
-        ]
-
-        # Optionally add one extra noisy alert for variety.
-        if n_services >= 4:
-            noise_src = services[3]
-            alerts.append(
-                (
-                    Alert(
-                        id="aux-004",
-                        title="Cache miss rate increased",
-                        severity="low",
-                        description="Cache miss rate above baseline; could be secondary effect.",
-                        source=noise_src,
-                    ),
-                    False,
-                )
-            )
+        # 3 alerts total: root + 2 downstream symptoms.
+        root_alert = Alert(
+            id=root_id,
+            title=f"{root_src} connection timeout",
+            severity="critical",
+            description=f"{root_src} is unstable; connection pool exhaustion leads to timeouts affecting dependent services.",
+            source=root_src,
+        )
+        sym1_src = random.choice(["api-gateway", "order-service", "user-service"])
+        sym2_src = random.choice(["payment-service", "inventory-service", "notification-service"])
+        symptom_alert_1 = Alert(
+            id=symptom_ids[0],
+            title="Elevated request errors",
+            severity="medium",
+            description=f"Downstream requests failing due to dependency errors originating in {root_src}.",
+            source=sym1_src,
+        )
+        symptom_alert_2 = Alert(
+            id=symptom_ids[1],
+            title="Service calls timing out",
+            severity="medium",
+            description=f"Secondary symptom: failures correlate with {root_src} instability and propagated dependency timeouts.",
+            source=sym2_src,
+        )
 
         return Scenario(
             name="cascading_db_failure",
             kind="cascading_db_failure",
             max_steps=10,
             initial_health=0.6,
-            initial_alerts_internal=alerts,
-            root_cause_alert_id="db-001",
+            initial_alerts_internal=[
+                (root_alert, True),
+                (symptom_alert_1, False),
+                (symptom_alert_2, False),
+            ],
+            root_cause_alert_id=root_id,
         )
 
     @staticmethod
     def _cascade_chain(*, chain_length: int) -> Scenario:
         # Required Task 3 scenario: "full_cascade_failure"
-        chain_services = ["auth-service", "user-service", "order-service", "payment-service"]
-        if chain_length != 4:
-            # Allow variable length, but keep the "auth → user → order → payment" prefix
-            extras = [s for s in ScenarioGenerator.SERVICE_NAMES if s not in chain_services]
-            random.shuffle(extras)
-            chain_services = (chain_services + extras)[: max(3, chain_length)]
+        all_svcs = [
+            "auth-service",
+            "user-service",
+            "order-service",
+            "payment-service",
+            "inventory-service",
+            "search-service",
+            "notification-service",
+            "billing-service",
+        ]
+        chain = random.sample(all_svcs, k=min(chain_length, len(all_svcs)))
 
         chain_ids: list[str] = []
         internal: list[Tuple[Alert, bool]] = []
+        descriptions = [
+            "{svc} is returning errors. Upstream dependencies may be affected.",
+            "{svc} health check failing. Dependency issues detected.",
+            "{svc} connection pool exhausted. Service degraded.",
+            "{svc} error rate elevated. Downstream impact observed.",
+            "{svc} latency spike. Cascading effects possible.",
+        ]
 
-        for i, svc in enumerate(chain_services):
-            aid = f"svc-{i+1:03d}"
+        for i, svc in enumerate(chain):
+            aid = f"inc-{random.randint(100, 999)}"
+            while aid in chain_ids:  # keep IDs unique within the chain
+                aid = f"inc-{random.randint(100, 999)}"
+
             chain_ids.append(aid)
-            next_svc = chain_services[i + 1] if i + 1 < len(chain_services) else None
-            hint = (
-                f"Downstream impact observed: {next_svc} reporting dependency errors."
-                if next_svc
-                else "Downstream impact widespread."
-            )
+            desc = random.choice(descriptions).replace("{svc}", svc)
+
             internal.append(
                 (
                     Alert(
                         id=aid,
                         title=f"{svc} failing",
                         severity="critical" if i == 0 else "high",
-                        description=f"{svc} error spike. {hint}",
+                        description=desc,
                         source=svc,
                     ),
-                    i == 0,  # treat first link as "root cause" internally
+                    i == 0,  # internal root-cause flag; not shown to agents
+                )
+            )
+
+        NOISE_ALERTS = [
+            ("High memory usage", "Memory utilization above 85%. Performance may degrade.", "low"),
+            ("Slow query detected", "Database query taking >5s. Possible index issue.", "low"),
+            ("Certificate expiring", "TLS certificate expires in 7 days.", "low"),
+            ("Disk usage warning", "Disk at 75%. Not yet critical.", "low"),
+        ]
+        n_noise = 1 if chain_length <= 4 else 2
+        used_ids = set(chain_ids)
+        for title, desc, severity in random.sample(NOISE_ALERTS, n_noise):
+            noise_id = f"noise-{random.randint(100,999)}"
+            while noise_id in used_ids:
+                noise_id = f"noise-{random.randint(100,999)}"
+            used_ids.add(noise_id)
+            internal.append(
+                (
+                    Alert(
+                        id=noise_id,
+                        title=title,
+                        severity=severity,
+                        description=desc,
+                        source="monitoring",
+                    ),
+                    False,
                 )
             )
 
@@ -208,7 +258,132 @@ class ScenarioGenerator:
             max_steps=20,
             initial_health=0.45,
             initial_alerts_internal=internal,
-            root_cause_alert_id=chain_ids[0],
+            root_cause_alert_id=chain_ids[0] if chain_ids else None,
             cascade_chain_alert_ids=tuple(chain_ids),
+        )
+
+    @staticmethod
+    def _alert_storm() -> Scenario:
+        # Required Task 4 scenario: "alert_storm" (signal vs noise)
+        all_svcs = [
+            "auth-service",
+            "user-service",
+            "order-service",
+            "payment-service",
+            "inventory-service",
+            "search-service",
+            "notification-service",
+            "billing-service",
+        ]
+        chain_svcs = random.sample(all_svcs, k=3)
+
+        real_ids: list[str] = []
+        real_alerts: list[Tuple[Alert, bool]] = []
+        for i, svc in enumerate(chain_svcs):
+            rid = f"real-{random.randint(100, 999)}"
+            while rid in real_ids:
+                rid = f"real-{random.randint(100, 999)}"
+
+            real_ids.append(rid)
+            next_svc = chain_svcs[i + 1] if i + 1 < len(chain_svcs) else None
+            if next_svc:
+                desc = f"{svc} is failing. Logs show repeated connection refused errors pointing to {next_svc}."
+            else:
+                desc = (
+                    f"{svc} is failing. No upstream dependency identified. This appears to be the origin of the incident."
+                )
+
+            real_alerts.append(
+                (
+                    Alert(
+                        id=rid,
+                        title=f"{svc} failing",
+                        severity="critical" if i == 0 else "high",
+                        description=desc,
+                        source=svc,
+                    ),
+                    i == 0,
+                )
+            )
+
+        noise_specs = [
+            ("low", "Certificate expiring soon", "Routine warning: cert expiry within 7 days.", "cert-expiry"),
+            (
+                "low",
+                "Backup disk usage high",
+                "Routine warning: backup disk at 78% capacity; within expected range.",
+                "storage-service",
+            ),
+            (
+                "low",
+                "CPU nominal",
+                "Routine warning: CPU within normal range; no action required.",
+                "compute-node",
+            ),
+            (
+                "low",
+                "Scheduled maintenance",
+                "Routine warning: scheduled maintenance window started; services may flap temporarily.",
+                "ops",
+            ),
+            (
+                "low",
+                "Log rotation complete",
+                "Routine warning: log rotation finished successfully; disk usage stabilized.",
+                "storage-service",
+            ),
+            (
+                "low",
+                "Memory within threshold",
+                "Routine warning: memory within threshold; no OOM risk indicated.",
+                "app-server",
+            ),
+            (
+                "low",
+                "Disk cleanup pending",
+                "Routine warning: disk cleanup pending; recommended during low-traffic periods.",
+                "storage-service",
+            ),
+        ]
+
+        noise_alerts: list[Tuple[Alert, bool]] = []
+        for i in range(7):
+            nid = f"noise-{i+1:03d}"
+            # Noise alerts should still use valid Alert.severity literals.
+            severity = "low"
+            _, title, description, source = noise_specs[i]
+            noise_alerts.append(
+                (
+                    Alert(
+                        id=nid,
+                        title=title,
+                        severity=severity,
+                        description=description,
+                        source=source,
+                    ),
+                    False,
+                )
+            )
+
+        all_alerts = real_alerts + noise_alerts
+        random.shuffle(all_alerts)
+
+        return Scenario(
+            name="alert_storm",
+            kind="alert_storm",
+            max_steps=15,
+            initial_health=0.5,
+            initial_alerts_internal=all_alerts,
+            root_cause_alert_id=real_ids[0] if real_ids else None,
+            cascade_chain_alert_ids=tuple(real_ids),
+        )
+
+
+if __name__ == "__main__":
+    for task in ["task_easy", "task_medium", "task_hard", "task_expert"]:
+        s = ScenarioGenerator.generate(task)
+        print(
+            f"{task}: {s.kind}, {len(s.initial_alerts_internal)} alerts, "
+            f"chain={s.cascade_chain_alert_ids}, correct_action='{s.correct_action}'"
         )
 

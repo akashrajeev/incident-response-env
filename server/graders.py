@@ -33,6 +33,19 @@ class IncidentGrader:
         "block",
     }
 
+    def _notes_bonus(self, action: IncidentAction, alert_obj) -> float:
+        notes = (action.notes or "").lower()
+        source = (alert_obj.source or "").lower()
+        if source and source in notes:
+            return 0.1
+        return 0.0
+
+    def _time_decay(self, reward: float, step: int) -> float:
+        if step <= 2:
+            return reward
+        decay = max(0.6, 1.0 - 0.04 * (step - 2))
+        return round(reward * decay, 4)
+
     def grade(
         self,
         *,
@@ -40,6 +53,7 @@ class IncidentGrader:
         scenario: Scenario,
         step: int,
         resolved: List[str],
+        investigated: List[str],
     ) -> Tuple[float, str]:
         if not action.alert_id:
             return 0.0, "No alert selected. Choose an alert_id to investigate or remediate."
@@ -56,36 +70,107 @@ class IncidentGrader:
 
         if scenario.kind == "disk_full":
             # Required Task 1 grading.
-            if action.alert_id != "disk-alert-1":
+            root_id = scenario.root_cause_alert_id
+            if action.alert_id != root_id:
                 return 0.0, "Wrong alert. Triage the disk alert."
-            if action_type == "scale_up":
-                return 1.0, "Correct: scaled storage to relieve disk pressure."
-            return 0.4, "Correct alert, but wrong action_type. Use scale_up."
+            correct_action = getattr(scenario, "correct_action", "scale_up") or "scale_up"
+            correct_action = correct_action.lower()
+
+            if action_type == correct_action:
+                reward = 1.0
+                if correct_action == "scale_up":
+                    feedback = "Correct: scaled storage to relieve disk pressure."
+                elif correct_action == "restart":
+                    feedback = "Correct: restarted the overloaded service to stabilize."
+                elif correct_action == "mitigate":
+                    feedback = "Correct: applied mitigation to restore stability."
+                else:
+                    feedback = f"Correct: applied the recommended action ({correct_action})."
+            else:
+                if is_resolution:
+                    reward = 0.4
+                    feedback = f"Correct alert, but wrong action_type. Use {correct_action}."
+                else:
+                    reward = 0.0
+                    feedback = f"Correct alert, but choose a resolution action ({correct_action}), not {action_type or 'investigate'}."
+
+            reward = min(1.0, reward + self._notes_bonus(action, alert_by_id[action.alert_id]))
+            reward = self._time_decay(reward, step)
+            return reward, feedback
 
         if scenario.kind == "cascading_db_failure":
-            # Required Task 2 grading (meaningful reward across steps).
             root_id = scenario.root_cause_alert_id or "db-001"
+
+            # Step 1 must be investigate on root cause.
+            # Step 2+ can be resolution.
             if action.alert_id == root_id:
-                reward = 1.0 if step == 1 else 0.5
-                feedback = "Addressed root cause." + (" Great first move." if step == 1 else "")
+                if action_type == "investigate":
+                    if root_id not in resolved:
+                        return 0.6, "Root cause identified. Now apply fix or remediate to resolve it."
+                    return 0.0, "Already investigated. Apply a resolution action."
+                elif is_resolution:
+                    # Check if they investigated first.
+                    # If step == 1, they skipped investigation — partial reward only.
+                    if step == 1:
+                        return 0.4, "Resolved root cause but skipped investigation. Investigate first for full score."
+                    return 0.9, "Correct: investigated then resolved root cause. Well done."
+                return 0.1, "Use investigate first, then a resolution action on the root cause."
             else:
-                reward = 0.1
-                feedback = "You addressed a symptom; root cause remains unresolved."
+                return 0.0, "That is a symptom not the root cause. Find and address the critical severity alert first."
 
-            # End bonus: if this action (once resolved by environment) would complete all critical.
-            # We approximate deterministically: if action targets the root cause with a resolution action.
-            if is_resolution and action.alert_id == root_id:
-                # Count remaining critical alerts besides this one.
-                remaining_critical = [
-                    a.id
-                    for a, _ in scenario.initial_alerts_internal
-                    if a.severity == "critical" and a.id not in resolved and a.id != action.alert_id
-                ]
-                if not remaining_critical:
-                    reward += 0.3
-                    feedback += " All critical alerts resolved. Bonus awarded."
+        if scenario.kind == "alert_storm":
+            # Expert grading: reward only for ordered progress.
+            chain = list(scenario.cascade_chain_alert_ids)
+            expected_index = sum(1 for cid in chain if cid in resolved)
+            expected_id = chain[expected_index] if expected_index < len(chain) else None
+            if expected_id is None:
+                return 0.0, "All real alerts resolved."
 
-            return min(1.0, reward), feedback
+            if action_type == "investigate":
+                if action.alert_id != expected_id:
+                    if step == 1:
+                        return 0.05, (
+                            "Investigating - this may not be the root cause. "
+                            "Try a different alert. Look for critical severity alerts "
+                            "that other services depend on."
+                        )
+                    elif step == 2:
+                        return 0.02, (
+                            "Still not the right alert. Switch to a different one - "
+                            "check which service has the most downstream dependencies."
+                        )
+                    else:
+                        return 0.0, (
+                            "Wrong alert. Stop investigating this service. "
+                            "Find the critical upstream failure and remediate it."
+                        )
+                if action.alert_id in investigated:
+                    return 0.0, "Already investigated. Apply a resolution action."
+                feedback = (
+                    f"Root cause confirmed at {expected_id}. Now apply fix, restart, or remediate to {expected_id} - do not move to another alert yet."
+                )
+                return 0.10, feedback
+
+            if not is_resolution:
+                return 0.0, "Use investigate first, then apply a resolution action."
+
+            if action.alert_id != expected_id:
+                return 0.0, (
+                    "Incorrect alert. In the expert scenario, start from the alert with "
+                    "the highest severity and trace its upstream dependencies. "
+                    "Look for the service that other failing services depend on."
+                )
+
+            reward = round(0.6 / len(chain), 3)
+            next_index = expected_index + 1
+            if next_index < len(chain):
+                feedback = (
+                    f"Correct. {expected_id} ({alert_by_id[expected_id].source}) resolved. "
+                    "System health improving. Identify and resolve the next upstream failure in the chain."
+                )
+            else:
+                feedback = f"Correct. {expected_id} resolved. Cascade complete - all services restored."
+            return reward, feedback
 
         # scenario.kind == "full_cascade_failure"
         chain = list(scenario.cascade_chain_alert_ids)
@@ -104,17 +189,40 @@ class IncidentGrader:
         if expected_id is None:
             return 0.0, "Cascade already resolved."
 
-        if action.alert_id == expected_id:
-            # Per-step share of 1.0 so a perfect run sums to 1.0 (matches episode score cap).
-            n = len(chain)
-            reward = 1.0 / n
-            feedback = "Correct next step in the cascade chain."
-            svc = alert_by_id[expected_id].source
-            if svc and svc.lower() in (action.notes or "").lower():
-                feedback += " Reasoning mentions the correct service."
-            if expected_index == len(chain) - 1:
-                feedback += " Chain complete."
-            return reward, feedback
+        if action_type == "investigate":
+            if action.alert_id != expected_id:
+                return 0.0, (
+                    "Wrong alert. That service is not the current upstream blocker. "
+                    "Re-read the active alerts and trace dependencies - resolve the earliest upstream failure first."
+                )
+            if action.alert_id in investigated:
+                return 0.0, f"Already investigated {action.alert_id}. Stop investigating and apply a resolution action: fix, restart, or remediate."
+            feedback = (
+                f"Correct alert identified. Now remediate {expected_id} to continue the chain."
+            )
+            return round(0.15 / len(chain), 3), feedback
 
-        return 0.05, "Out of order. Trace dependencies and resolve the next upstream failure first."
+        if not is_resolution:
+            return 0.0, "Use investigate first, then apply a resolution action."
+
+        if action.alert_id != expected_id:
+            return 0.0, (
+                "Wrong alert. That service is not the current upstream blocker. "
+                "Re-read the active alerts and trace dependencies - resolve the earliest upstream failure first."
+            )
+
+        n = len(chain)
+        if expected_id not in investigated:
+            reward = round(0.5 / n, 3)  # half credit for skipping investigation
+            return reward, (
+                f"Partially correct - resolved {expected_id} but skipped investigation. "
+                f"Investigate before remediating for full score."
+            )
+        reward = round(1.0 / n, 3)
+        next_index = expected_index + 1
+        if next_index < len(chain):
+            feedback = "Correct step: investigated then resolved. Move to next alert."
+        else:
+            feedback = f"Correct. {expected_id} resolved. Cascade complete - all services restored."
+        return reward, feedback
 

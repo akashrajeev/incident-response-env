@@ -27,7 +27,7 @@ Realistic **site reliability / incident triage** environment for [OpenEnv](https
 |---------------|---------------------------------------------|
 | `task_easy`   | Single disk pressure alert -> scale storage. |
 | `task_medium` | Multiple alerts -> remediate DB root cause.  |
-| `task_hard`   | Ordered `svc-001`... cascade -> full chain.    |
+| `task_hard`   | Ordered `inc-342`... cascade -> full chain.    |
 
 Rewards are always in **\[0, 1]** per step; the baseline caps **episode score** at **1.0** (sum of step rewards).
 
@@ -57,7 +57,7 @@ Reset & step (example):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/reset -H "Content-Type: application/json" -d "{\"task_id\":\"task_easy\"}"
-curl -s -X POST http://127.0.0.1:8000/step -H "Content-Type: application/json" -d "{\"action\":{\"alert_id\":\"disk-alert-1\",\"action_type\":\"scale_up\",\"notes\":\"Relieve disk pressure\"}}"
+curl -s -X POST http://127.0.0.1:8000/step -H "Content-Type: application/json" -d "{\"action\":{\"alert_id\":\"disk-alert-07\",\"action_type\":\"scale_up\",\"notes\":\"Relieve disk pressure\"}}"
 ```
 
 ## Baseline inference (`inference.py`)
@@ -191,7 +191,7 @@ with IncidentResponseEnv(base_url="http://localhost:8000") as env:
     r = env.reset(task_id="task_easy")  # pass kwargs your server accepts
     r = env.step(
         IncidentResponseAction(
-            alert_id="disk-alert-1",
+            alert_id="disk-alert-07",
             action_type="scale_up",
             notes="Expand storage.",
         )
