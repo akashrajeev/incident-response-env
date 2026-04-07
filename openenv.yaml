@@ -9,16 +9,16 @@ tasks:
   - id: task_easy
     name: Single Alert Triage
     difficulty: easy
-    max_steps: 5
+    max_steps: 3
   - id: task_medium
     name: Root Cause Identification
     difficulty: medium
-    max_steps: 10
+    max_steps: 6
   - id: task_hard
     name: Cascading Failure Resolution
     difficulty: hard
-    # Matches server scenario max_steps; chain has 3-5 svc alerts depending on randomness.
-    max_steps: 20
+    # Matches server scenario max_steps; fixed chain length + noise in scenarios.py.
+    max_steps: 13
   - id: task_expert
     name: Alert Storm — Signal vs Noise
     difficulty: expert

@@ -1,8 +1,8 @@
 """
 Core environment logic for the Incident Response playground.
 
-This module intentionally keeps "ground truth" (e.g., root-cause flags) internal and
-never returns it in observations. Agents must infer root cause from context.
+Ground truth (root-cause flags, chain order) is intentionally kept internal
+and never returned in observations. Agents must infer from context.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ try:
     from ..models import Alert, IncidentAction, IncidentObservation, IncidentState
     from .graders import IncidentGrader
     from .scenarios import Scenario, ScenarioGenerator
-except ImportError:  # pragma: no cover
+except ImportError:
     from models import Alert, IncidentAction, IncidentObservation, IncidentState
     from server.graders import IncidentGrader
     from server.scenarios import Scenario, ScenarioGenerator
@@ -31,15 +31,13 @@ class _InternalAlert:
 
 
 class IncidentResponseEnvironment(Environment):
-    # HTTP server uses a process-wide shared instance for /reset + /step; only
-    # one logical episode/client should drive it at a time. Parallel evaluators
-    # against the same Space would interleave; run sequential episodes or one client.
+    # HTTP server uses a single shared process-wide episode.
+    # Callers must POST /reset before each new task.
     SUPPORTS_CONCURRENT_SESSIONS: bool = False
 
     def __init__(self):
         self.grader = IncidentGrader()
         self.scenario: Optional[Scenario] = None
-
         self.resolved: List[str] = []
         self._investigated: List[str] = []
         self.step_count: int = 0
@@ -47,10 +45,9 @@ class IncidentResponseEnvironment(Environment):
         self.task_id: str = "task_easy"
         self.total_reward: float = 0.0
         self.current_health: float = 1.0
-
         self._alerts: List[_InternalAlert] = []
 
-    def reset(self, task_id: str = "task_easy", seed: int | None = None):  # type: ignore[override]
+    def reset(self, task_id: str = "task_easy", seed: int | None = None):
         self.scenario = ScenarioGenerator.generate(task_id, seed=seed)
         self.resolved = []
         self._investigated = []
@@ -75,30 +72,44 @@ class IncidentResponseEnvironment(Environment):
             message="Incident detected. Begin triage.",
         )
 
-    def step(self, action: IncidentAction) -> IncidentObservation:  # type: ignore[override]
+    def step(self, action: IncidentAction) -> IncidentObservation:
         if self.scenario is None:
-            # Be forgiving if a judge/runner forgets to call reset first.
-            self.reset(task_id=getattr(action, "task_id", "task_easy"))
+            self.reset(task_id="task_easy")
 
         self.step_count += 1
 
         reward, feedback = self.grader.grade(
             action=action,
-            scenario=self.scenario,  # type: ignore[arg-type]
+            scenario=self.scenario,
             step=self.step_count,
             resolved=self.resolved,
             investigated=self._investigated,
         )
+
+        # Track investigated alerts (only when grader gave positive reward for investigate)
         if (
             (action.action_type or "").lower().strip() == "investigate"
             and reward > 0
             and action.alert_id
             and action.alert_id not in self._investigated
         ):
-            self._investigated.append(action.alert_id)
-        self.total_reward += reward
+            sk = self.scenario.kind
+            if sk in ("full_cascade_failure", "alert_storm"):
+                nxt = self._next_unresolved_chain_id()
+                if nxt is not None and action.alert_id == nxt:
+                    self._investigated.append(action.alert_id)
+            else:
+                self._investigated.append(action.alert_id)
 
+        self.total_reward += reward
         self._maybe_resolve(action)
+
+        # Update system health on resolution actions
+        if (action.action_type or "").lower().strip() in {
+            "scale_up", "restart", "rollback", "fix",
+            "mitigate", "remediate", "isolate", "block",
+        }:
+            self._update_health()
 
         done = self._episode_goal_satisfied() or (
             self.scenario is not None and self.step_count >= self.scenario.max_steps
@@ -114,45 +125,44 @@ class IncidentResponseEnvironment(Environment):
             message=feedback,
         )
 
-    def get_metadata(self) -> EnvironmentMetadata:  # type: ignore[override]
+    def get_metadata(self) -> EnvironmentMetadata:
         return EnvironmentMetadata(
             name=self.__class__.__name__,
             description=(
-                "Incident triage env (easy/medium/hard). "
-                "HTTP mode: single shared episode per process; always POST /reset before a new task. "
-                "SUPPORTS_CONCURRENT_SESSIONS is False."
+                "Incident triage environment with 4 tasks (easy/medium/hard/expert). "
+                "HTTP mode: single shared episode per process. "
+                "Always POST /reset before starting a new task. "
+                "SUPPORTS_CONCURRENT_SESSIONS=False."
             ),
             version="1.0.0",
         )
 
     @property
-    def state(self) -> IncidentState:  # type: ignore[override]
-        scenario_name = self.scenario.name if self.scenario is not None else "unknown"
-        max_steps = self.scenario.max_steps if self.scenario is not None else 0
+    def state(self) -> IncidentState:
         return IncidentState(
             episode_id=self.episode_id,
             task_id=self.task_id,
             step_count=self.step_count,
-            max_steps=max_steps,
+            max_steps=self.scenario.max_steps if self.scenario else 0,
             total_reward=self.total_reward,
-            scenario_name=scenario_name,
+            scenario_name=self.scenario.name if self.scenario else "unknown",
         )
 
-    def _update_health(self, action: IncidentAction) -> None:
-        # Simple deterministic health update: remediation actions improve health more.
-        delta = 0.02
-        if action.action_type in {
-            "scale_up",
-            "restart",
-            "rollback",
-            "fix",
-            "mitigate",
-            "remediate",
-            "isolate",
-            "block",
-        }:
-            delta = 0.05
-        self.current_health = max(0.0, min(1.0, self.current_health + delta))
+    def _update_health(self) -> None:
+        """Improve system health slightly on each resolution action."""
+        total = len(self._alerts)
+        remaining = total - len(self.resolved)
+        improvement = 0.05 * (remaining / max(total, 1))
+        self.current_health = min(1.0, self.current_health + improvement)
+
+    def _next_unresolved_chain_id(self) -> Optional[str]:
+        if self.scenario is None or not self.scenario.cascade_chain_alert_ids:
+            return None
+        chain = list(self.scenario.cascade_chain_alert_ids)
+        for cid in chain:
+            if cid not in self.resolved:
+                return cid
+        return None
 
     def _maybe_resolve(self, action: IncidentAction) -> None:
         if self.scenario is None:
@@ -161,57 +171,46 @@ class IncidentResponseEnvironment(Environment):
             return
 
         action_type = (action.action_type or "").lower().strip()
-        resolution_actions = {
-            "scale_up",
-            "restart",
-            "rollback",
-            "fix",
-            "mitigate",
-            "remediate",
-            "isolate",
-            "block",
-        }
-        if action_type not in resolution_actions:
+        if action_type not in {
+            "scale_up", "restart", "rollback", "fix",
+            "mitigate", "remediate", "isolate", "block",
+        }:
             return
 
-        # Hard task: only allow resolving the next upstream link in the chain.
-        if self.scenario.kind in ("full_cascade_failure", "alert_storm") and self.scenario.cascade_chain_alert_ids:
+        if self.scenario.kind == "cascading_db_failure":
+            # Medium task: allow resolving root without requiring investigate.
+            # (Grader can still award higher total when investigate is done first.)
+            pass
+
+        # Cascade tasks: correct next link only, and only after investigate on that link
+        if (
+            self.scenario.kind in ("full_cascade_failure", "alert_storm")
+            and self.scenario.cascade_chain_alert_ids
+        ):
             chain = list(self.scenario.cascade_chain_alert_ids)
-            expected_index = 0
-            for cid in chain:
-                if cid in self.resolved:
-                    expected_index += 1
-                else:
-                    break
+            expected_index = sum(1 for cid in chain if cid in self.resolved)
             expected_id = chain[expected_index] if expected_index < len(chain) else None
             if action.alert_id != expected_id:
                 return
+            # Allow resolution without prior investigation (bonus handled in grader).
 
         self.resolved.append(action.alert_id)
-        self._update_health(action)
 
     def _get_active_alerts(self) -> List[Alert]:
-        # Never reveal internal root-cause flags.
-        active = []
-        for entry in self._alerts:
-            if entry.alert.id not in self.resolved:
-                active.append(entry.alert)
-        return active
+        return [
+            entry.alert
+            for entry in self._alerts
+            if entry.alert.id not in self.resolved
+        ]
 
     def _all_critical_resolved(self) -> bool:
-        for entry in self._alerts:
-            if entry.alert.severity == "critical" and entry.alert.id not in self.resolved:
-                return False
-        return True
+        return all(
+            entry.alert.id in self.resolved
+            for entry in self._alerts
+            if entry.alert.severity == "critical"
+        )
 
     def _episode_goal_satisfied(self) -> bool:
-        """
-        Episode ends when the task's success condition is met.
-
-        Cascade (hard) tasks require every link in cascade_chain_alert_ids to be
-        resolved - not only severity:critical rows - so agents earn graded rewards
-        along the full chain and total score can reach 1.0.
-        """
         if self.scenario is None:
             return False
         if (
@@ -223,4 +222,3 @@ class IncidentResponseEnvironment(Environment):
                 for cid in self.scenario.cascade_chain_alert_ids
             )
         return self._all_critical_resolved()
-
