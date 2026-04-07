@@ -7,9 +7,9 @@ import requests
 ENV_URL = os.environ.get("ENV_URL", "http://localhost:8000")
 
 _MAX_STEPS = {
-    "task_easy": 5,
-    "task_medium": 10,
-    "task_hard": 20,
+    "task_easy": 3,
+    "task_medium": 6,
+    "task_hard": 13,
     "task_expert": 15,
 }
 
